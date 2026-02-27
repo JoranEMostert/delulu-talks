@@ -10,6 +10,9 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
+
 use arboard::Clipboard;
 use cpal::{
     traits::{DeviceTrait, HostTrait, StreamTrait},
@@ -406,16 +409,25 @@ fn command_error(prefix: &str, stderr: &[u8]) -> String {
     }
 }
 
+fn configure_child_process(command: &mut Command) {
+    #[cfg(windows)]
+    {
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+}
+
 fn ensure_python_binary(settings: &AppSettings) -> Result<(), String> {
-    let output = Command::new(&settings.python_command)
-        .arg("--version")
-        .output()
-        .map_err(|err| {
-            format!(
-                "Python command '{}' failed to start: {err}",
-                settings.python_command
-            )
-        })?;
+    let mut command = Command::new(&settings.python_command);
+    command.arg("--version");
+    configure_child_process(&mut command);
+
+    let output = command.output().map_err(|err| {
+        format!(
+            "Python command '{}' failed to start: {err}",
+            settings.python_command
+        )
+    })?;
 
     if output.status.success() {
         Ok(())
@@ -428,30 +440,34 @@ fn ensure_python_binary(settings: &AppSettings) -> Result<(), String> {
 }
 
 fn ensure_python_dependencies(settings: &AppSettings) -> Result<(), String> {
-    let check = Command::new(&settings.python_command)
-        .args(["-c", "import qwen_asr, torch, torchvision"])
-        .output()
-        .map_err(|err| {
-            format!(
-                "Dependency check failed for '{}': {err}",
-                settings.python_command
-            )
-        })?;
+    let mut check_command = Command::new(&settings.python_command);
+    check_command.args(["-c", "import qwen_asr, torch, torchvision"]);
+    configure_child_process(&mut check_command);
+
+    let check = check_command.output().map_err(|err| {
+        format!(
+            "Dependency check failed for '{}': {err}",
+            settings.python_command
+        )
+    })?;
 
     if check.status.success() {
         return Ok(());
     }
 
-    let install = Command::new(&settings.python_command)
-        .args([
-            "-m",
-            "pip",
-            "install",
-            "-U",
-            "qwen-asr",
-            "torch",
-            "torchvision",
-        ])
+    let mut install_command = Command::new(&settings.python_command);
+    install_command.args([
+        "-m",
+        "pip",
+        "install",
+        "-U",
+        "qwen-asr",
+        "torch",
+        "torchvision",
+    ]);
+    configure_child_process(&mut install_command);
+
+    let install = install_command
         .output()
         .map_err(|err| format!("Failed launching pip installer: {err}"))?;
 
@@ -468,13 +484,17 @@ fn ensure_python_dependencies(settings: &AppSettings) -> Result<(), String> {
 fn warmup_selected_model(settings: &AppSettings, app: &AppHandle) -> Result<(), String> {
     let script_path = resolve_transcriber_script(app)?;
 
-    let output = Command::new(&settings.python_command)
+    let mut command = Command::new(&settings.python_command);
+    command
         .arg(script_path)
         .arg("--warmup")
         .arg("--model")
         .arg(settings.model.as_hf_id())
         .arg("--language")
-        .arg(&settings.language)
+        .arg(&settings.language);
+    configure_child_process(&mut command);
+
+    let output = command
         .output()
         .map_err(|err| format!("Failed launching model warmup: {err}"))?;
 
@@ -539,21 +559,23 @@ fn transcribe_audio(
 ) -> Result<String, String> {
     let script_path = resolve_transcriber_script(app)?;
 
-    let output = Command::new(&settings.python_command)
+    let mut command = Command::new(&settings.python_command);
+    command
         .arg(script_path)
         .arg("--audio")
         .arg(audio_path)
         .arg("--model")
         .arg(settings.model.as_hf_id())
         .arg("--language")
-        .arg(&settings.language)
-        .output()
-        .map_err(|err| {
-            format!(
-                "Failed to launch Python process '{}': {err}",
-                settings.python_command
-            )
-        })?;
+        .arg(&settings.language);
+    configure_child_process(&mut command);
+
+    let output = command.output().map_err(|err| {
+        format!(
+            "Failed to launch Python process '{}': {err}",
+            settings.python_command
+        )
+    })?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
