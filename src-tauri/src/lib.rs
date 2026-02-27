@@ -636,7 +636,6 @@ fn ensure_overlay_window(app: &AppHandle) -> Result<(), String> {
     .resizable(false)
     .decorations(false)
     .always_on_top(true)
-    .transparent(true)
     .focusable(false)
     .skip_taskbar(true)
     .visible(false)
