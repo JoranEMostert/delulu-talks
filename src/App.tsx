@@ -100,7 +100,7 @@ function IconStop({ className = "h-4 w-4" }: IconProps) {
 const defaultSettings: AppSettings = {
   shortcut: "Ctrl+Shift+Space",
   recordingMode: "hold",
-  model: "qwen3Asr17b",
+  model: "qwen3Asr06b",
   language: "auto",
   pythonCommand: "python",
   inputDevice: "default",
@@ -108,9 +108,9 @@ const defaultSettings: AppSettings = {
 
 const modelDescriptions: Record<ModelOption, string> = {
   qwen3Asr17b:
-    "Best quality for multilingual speech, accents, and noisy audio.",
+    "Higher quality, but can run out of VRAM on smaller Linux GPUs.",
   qwen3Asr06b:
-    "Faster and lighter model with lower memory usage.",
+    "Recommended on this machine: lighter, faster, and stable on lower VRAM.",
 };
 
 const tabs: Array<{ id: SettingsTab; label: string; hint: string; icon: (props: IconProps) => ReactElement }> = [
@@ -255,6 +255,14 @@ function OverlayPill() {
   const [status, setStatus] = useState<DictationStatus>({ phase: "idle" });
 
   useEffect(() => {
+    void invoke<DictationStatus>("get_runtime_status")
+      .then((runtimeStatus) => {
+        setStatus(runtimeStatus);
+      })
+      .catch(() => {
+        // Ignore initial sync failures and fall back to event updates.
+      });
+
     let mounted = true;
     let unlistenPromise: Promise<() => void> | undefined;
 
@@ -339,11 +347,13 @@ function SettingsPage() {
 
   useEffect(() => {
     void (async () => {
-      const [loaded, devices] = await Promise.all([
+      const [loaded, runtimeStatus, devices] = await Promise.all([
         invoke<AppSettings>("get_settings"),
+        invoke<DictationStatus>("get_runtime_status"),
         invoke<string[]>("list_input_devices"),
       ]);
       setSettings(loaded);
+      setStatus(runtimeStatus);
       setLanguageQuery(formatLanguageLabel(loaded.language));
 
       const normalized = devices.length > 0 ? devices : ["default"];
@@ -628,8 +638,8 @@ function SettingsPage() {
                             }))
                           }
                         >
-                          <option value="qwen3Asr17b">Qwen3-ASR-1.7B</option>
-                          <option value="qwen3Asr06b">Qwen3-ASR-0.6B</option>
+                          <option value="qwen3Asr17b">Qwen3-ASR-1.7B (High VRAM)</option>
+                          <option value="qwen3Asr06b">Qwen3-ASR-0.6B (Recommended)</option>
                         </select>
                         <p className="text-xs text-slate-500">
                           {modelDescriptions[settings.model]}

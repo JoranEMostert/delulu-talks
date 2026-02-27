@@ -33,6 +33,7 @@ use tauri::{
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 
 const SETTINGS_FILE: &str = "settings.json";
+const STATUS_FILE: &str = "runtime-status.json";
 const DICTATION_EVENT: &str = "dictation-state";
 const TRANSCRIPT_EVENT: &str = "dictation-transcript";
 const OVERLAY_LABEL: &str = "overlay";
@@ -77,7 +78,7 @@ impl Default for AppSettings {
         Self {
             shortcut: "Ctrl+Shift+Space".to_string(),
             recording_mode: RecordingMode::Hold,
-            model: ModelOption::Qwen3Asr17b,
+            model: ModelOption::Qwen3Asr06b,
             language: "auto".to_string(),
             python_command: "python".to_string(),
             input_device: DEFAULT_INPUT_DEVICE.to_string(),
@@ -144,6 +145,7 @@ struct AppRuntime {
     settings: Mutex<AppSettings>,
     phase: Mutex<RuntimePhase>,
     ready: Mutex<bool>,
+    last_status: Mutex<DictationStatus>,
     bootstrap_lock: Mutex<()>,
     registered_shortcut: Mutex<String>,
     worker_tx: Sender<WorkerCommand>,
@@ -176,6 +178,23 @@ fn save_settings(app: &AppHandle, settings: &AppSettings) -> Result<(), String> 
     let serialized = serde_json::to_string_pretty(settings)
         .map_err(|err| format!("Failed to serialize settings: {err}"))?;
     fs::write(path, serialized).map_err(|err| format!("Failed to persist settings: {err}"))
+}
+
+fn status_path(app: &AppHandle) -> Result<PathBuf, String> {
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|err| format!("Failed to resolve app data dir: {err}"))?;
+
+    fs::create_dir_all(&dir).map_err(|err| format!("Failed to create app data dir: {err}"))?;
+    Ok(dir.join(STATUS_FILE))
+}
+
+fn save_status(app: &AppHandle, status: &DictationStatus) -> Result<(), String> {
+    let path = status_path(app)?;
+    let serialized = serde_json::to_string_pretty(status)
+        .map_err(|err| format!("Failed to serialize runtime status: {err}"))?;
+    fs::write(path, serialized).map_err(|err| format!("Failed to persist runtime status: {err}"))
 }
 
 fn list_input_devices_internal() -> Result<Vec<String>, String> {
@@ -410,6 +429,24 @@ fn command_error(prefix: &str, stderr: &[u8]) -> String {
 }
 
 fn configure_child_process(command: &mut Command) {
+    for key in [
+        "APPDIR",
+        "APPIMAGE",
+        "ARGV0",
+        "LD_LIBRARY_PATH",
+        "PYTHONHOME",
+        "PYTHONPATH",
+        "PYTHONEXECUTABLE",
+        "__PYVENV_LAUNCHER__",
+        "PERLLIB",
+        "GSETTINGS_SCHEMA_DIR",
+        "QT_PLUGIN_PATH",
+        "GST_PLUGIN_SYSTEM_PATH",
+        "GST_PLUGIN_SYSTEM_PATH_1_0",
+    ] {
+        command.env_remove(key);
+    }
+
     #[cfg(windows)]
     {
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
@@ -518,6 +555,7 @@ fn bootstrap_asr_runtime(
     let _ = set_runtime_ready(state, false);
     emit_status(
         app,
+        state,
         DictationPhase::Bootstrapping,
         Some("Checking Python runtime...".to_string()),
     );
@@ -526,6 +564,7 @@ fn bootstrap_asr_runtime(
 
     emit_status(
         app,
+        state,
         DictationPhase::Bootstrapping,
         Some("Ensuring ASR dependencies are installed...".to_string()),
     );
@@ -533,13 +572,15 @@ fn bootstrap_asr_runtime(
 
     emit_status(
         app,
+        state,
         DictationPhase::Bootstrapping,
         Some("Preparing selected model (first run may download)...".to_string()),
     );
     warmup_selected_model(&settings, app)?;
 
     let _ = set_runtime_ready(state, true);
-    emit_status(app, DictationPhase::Idle, Some("Ready".to_string()));
+    emit_status(app, state, DictationPhase::Idle, Some("Ready".to_string()));
+    let _ = show_settings_window(app);
     Ok(())
 }
 
@@ -547,7 +588,8 @@ fn spawn_bootstrap_task(app: AppHandle, state: Arc<AppRuntime>, settings: AppSet
     thread::spawn(move || {
         if let Err(err) = bootstrap_asr_runtime(&app, &state, settings) {
             let _ = set_runtime_ready(&state, false);
-            emit_status(&app, DictationPhase::Error, Some(err));
+            emit_status(&app, &state, DictationPhase::Error, Some(err));
+            let _ = show_settings_window(&app);
         }
     });
 }
@@ -695,11 +737,22 @@ fn place_overlay_bottom_center(app: &AppHandle) {
     let _ = window.set_position(Position::Physical(PhysicalPosition::new(x, y)));
 }
 
-fn emit_status(app: &AppHandle, phase: DictationPhase, message: Option<String>) {
+fn emit_status(
+    app: &AppHandle,
+    state: &Arc<AppRuntime>,
+    phase: DictationPhase,
+    message: Option<String>,
+) {
     let payload = DictationStatus {
         phase: phase.clone(),
         message,
     };
+
+    if let Ok(mut last_status) = state.last_status.lock() {
+        *last_status = payload.clone();
+    }
+
+    let _ = save_status(app, &payload);
 
     let _ = app.emit(DICTATION_EVENT, payload.clone());
 
@@ -716,6 +769,15 @@ fn emit_status(app: &AppHandle, phase: DictationPhase, message: Option<String>) 
             }
         }
     }
+}
+
+#[tauri::command]
+fn get_runtime_status(state: State<'_, Arc<AppRuntime>>) -> Result<DictationStatus, String> {
+    state
+        .last_status
+        .lock()
+        .map(|status| status.clone())
+        .map_err(|_| "Failed to lock runtime status".to_string())
 }
 
 fn set_phase(state: &Arc<AppRuntime>, phase: RuntimePhase) -> Result<(), String> {
@@ -760,7 +822,7 @@ fn worker_start(app: &AppHandle, state: &Arc<AppRuntime>, active: &mut Option<Re
         Ok(RuntimePhase::Listening) => return,
         Ok(RuntimePhase::Idle) => {}
         Err(err) => {
-            emit_status(app, DictationPhase::Error, Some(err));
+            emit_status(app, state, DictationPhase::Error, Some(err));
             return;
         }
     }
@@ -770,13 +832,14 @@ fn worker_start(app: &AppHandle, state: &Arc<AppRuntime>, active: &mut Option<Re
         Ok(false) => {
             emit_status(
                 app,
+                state,
                 DictationPhase::Bootstrapping,
                 Some("ASR setup still running. Please wait...".to_string()),
             );
             return;
         }
         Err(err) => {
-            emit_status(app, DictationPhase::Error, Some(err));
+            emit_status(app, state, DictationPhase::Error, Some(err));
             return;
         }
     }
@@ -786,6 +849,7 @@ fn worker_start(app: &AppHandle, state: &Arc<AppRuntime>, active: &mut Option<Re
         Err(_) => {
             emit_status(
                 app,
+                state,
                 DictationPhase::Error,
                 Some("Failed to lock settings".to_string()),
             );
@@ -799,13 +863,14 @@ fn worker_start(app: &AppHandle, state: &Arc<AppRuntime>, active: &mut Option<Re
             let _ = set_phase(state, RuntimePhase::Listening);
             emit_status(
                 app,
+                state,
                 DictationPhase::Listening,
                 Some("Listening...".to_string()),
             );
         }
         Err(err) => {
             let _ = set_phase(state, RuntimePhase::Idle);
-            emit_status(app, DictationPhase::Error, Some(err));
+            emit_status(app, state, DictationPhase::Error, Some(err));
         }
     }
 }
@@ -823,7 +888,7 @@ fn worker_stop(app: &AppHandle, state: &Arc<AppRuntime>, active: &mut Option<Rec
         Ok(path) => path,
         Err(err) => {
             let _ = set_phase(state, RuntimePhase::Idle);
-            emit_status(app, DictationPhase::Error, Some(err));
+            emit_status(app, state, DictationPhase::Error, Some(err));
             return;
         }
     };
@@ -831,6 +896,7 @@ fn worker_stop(app: &AppHandle, state: &Arc<AppRuntime>, active: &mut Option<Rec
     let _ = set_phase(state, RuntimePhase::Transcribing);
     emit_status(
         app,
+        state,
         DictationPhase::Transcribing,
         Some("Transcribing speech...".to_string()),
     );
@@ -841,6 +907,7 @@ fn worker_stop(app: &AppHandle, state: &Arc<AppRuntime>, active: &mut Option<Rec
             let _ = set_phase(state, RuntimePhase::Idle);
             emit_status(
                 app,
+                state,
                 DictationPhase::Error,
                 Some("Failed to lock settings".to_string()),
             );
@@ -859,17 +926,17 @@ fn worker_stop(app: &AppHandle, state: &Arc<AppRuntime>, active: &mut Option<Rec
             }
 
             if let Err(err) = inject_text_at_cursor(&text) {
-                emit_status(app, DictationPhase::Error, Some(err));
+                emit_status(app, state, DictationPhase::Error, Some(err));
             }
         }
         Err(err) => {
-            emit_status(app, DictationPhase::Error, Some(err));
+            emit_status(app, state, DictationPhase::Error, Some(err));
         }
     }
 
     let _ = fs::remove_file(&audio_path);
     let _ = set_phase(state, RuntimePhase::Idle);
-    emit_status(app, DictationPhase::Idle, None);
+    emit_status(app, state, DictationPhase::Idle, None);
 }
 
 fn run_worker_loop(app: AppHandle, state: Arc<AppRuntime>, rx: Receiver<WorkerCommand>) {
@@ -1226,23 +1293,35 @@ pub fn run() {
                 settings: Mutex::new(initial_settings.clone()),
                 phase: Mutex::new(RuntimePhase::Idle),
                 ready: Mutex::new(false),
+                last_status: Mutex::new(DictationStatus {
+                    phase: DictationPhase::Bootstrapping,
+                    message: Some("Starting up...".to_string()),
+                }),
                 bootstrap_lock: Mutex::new(()),
                 registered_shortcut: Mutex::new(initial_settings.shortcut.clone()),
                 worker_tx,
             });
 
             app.manage(runtime.clone());
-            let normalized_shortcut =
-                register_shortcut(app.handle(), &runtime, &initial_settings.shortcut)?;
-
-            if normalized_shortcut != initial_settings.shortcut {
-                let mut loaded_settings = initial_settings.clone();
-                loaded_settings.shortcut = normalized_shortcut;
-                save_settings(app.handle(), &loaded_settings)?;
-                *runtime
-                    .settings
-                    .lock()
-                    .map_err(|_| "Failed to lock settings".to_string())? = loaded_settings.clone();
+            match register_shortcut(app.handle(), &runtime, &initial_settings.shortcut) {
+                Ok(normalized_shortcut) => {
+                    if normalized_shortcut != initial_settings.shortcut {
+                        let mut loaded_settings = initial_settings.clone();
+                        loaded_settings.shortcut = normalized_shortcut;
+                        save_settings(app.handle(), &loaded_settings)?;
+                        *runtime
+                            .settings
+                            .lock()
+                            .map_err(|_| "Failed to lock settings".to_string())? =
+                            loaded_settings.clone();
+                    }
+                }
+                Err(error) => {
+                    eprintln!(
+                        "Warning: failed to register startup shortcut '{}': {error}",
+                        initial_settings.shortcut
+                    );
+                }
             }
 
             let app_handle_for_worker = app.handle().clone();
@@ -1275,6 +1354,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             get_settings,
+            get_runtime_status,
             list_input_devices,
             normalize_shortcut,
             update_settings,
