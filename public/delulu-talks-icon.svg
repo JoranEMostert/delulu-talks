@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="100%" height="100%">
+  <title>Delulu Talks - Full Blue Gradient Logo</title>
+  <defs>
+    <linearGradient id="blueDoodleGrad" x1="0" y1="0" x2="256" y2="256" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#00E5FF" />
+      <stop offset="100%" stop-color="#2962FF" />
+    </linearGradient>
+    
+    <clipPath id="mic-hole">
+      <path d="M0,0 H256 V256 H0 Z M120,60 h16 a40,40 0 0 1 40,40 v60 a40,40 0 0 1 -40,40 h-16 a40,40 0 0 1 -40,-40 v-60 a40,40 0 0 1 40,-40 Z" fill-rule="evenodd" clip-rule="evenodd" />
+    </clipPath>
+  </defs>
+
+  <g clip-path="url(#mic-hole)" fill="none" stroke="url(#blueDoodleGrad)" stroke-width="6" stroke-linecap="round">
+    <path d="M 128 20 C 190 20 230 60 230 120 C 230 180 190 220 128 220 C 66 220 26 180 26 120 C 26 60 66 20 128 20 Z" transform="rotate(5 128 128) translate(4 4)" />
+    <path d="M 128 20 C 190 20 230 60 230 120 C 230 180 190 220 128 220 C 66 220 26 180 26 120 C 26 60 66 20 128 20 Z" transform="rotate(-8 128 128) translate(-6 -2)" />
+    <path d="M 128 20 C 190 20 230 60 230 120 C 230 180 190 220 128 220 C 66 220 26 180 26 120 C 26 60 66 20 128 20 Z" transform="scale(0.95) translate(6 12)" />
+    
+    <path d="M 60 190 Q 20 230 10 250 Q 40 210 80 205" stroke-width="10" />
+    <path d="M 50 195 Q 15 235 5 255" stroke-width="4" />
+  </g>
+
+  <g stroke="url(#blueDoodleGrad)" fill="none" transform="translate(0, -6)">
+    <rect x="110" y="74" width="36" height="56" rx="18" stroke-width="12" />
+    
+    <path d="M 88 110 A 40 40 0 0 0 168 110" stroke-width="12" stroke-linecap="round" />
+    
+    <line x1="128" y1="150" x2="128" y2="186" stroke-width="12" stroke-linecap="round" />
+    
+    <line x1="96" y1="186" x2="160" y2="186" stroke-width="12" stroke-linecap="round" />
+  </g>
+</svg>
